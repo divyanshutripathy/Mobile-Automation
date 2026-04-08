@@ -2,19 +2,6 @@
 
 `mobile_automation` is a deterministic simulated mobile food-ordering environment built for OpenEnv. It models a mock delivery app called `QuickCart` using hidden semantic state, reusable screen templates, deterministic XML and screenshot rendering, and rule-based grading for three tasks.
 
-## Why this is a real-world task simulation
-
-Agents must interpret realistic mobile-style observations, search and navigate through restaurant listings, manage a cart, apply coupons, pick delivery preferences, and avoid unsafe actions. The environment is still fully local and container-friendly because it does not use Android automation, browsers, emulators, or external UI drivers.
-
-## Architecture
-
-- Hidden semantic state in `server/sim_state.py` is the source of truth.
-- `server/ui.py` converts semantic state into visible `UIElement` objects.
-- `server/render.py` deterministically projects the UI into XML and a mock PNG screenshot.
-- `server/mobile_automation_environment.py` applies actions and owns episode flow.
-- `server/tasks.py` defines the three tasks and weighted predicates.
-- `server/graders.py` computes dense progress, penalties, final score, and metadata.
-
 ## Action space
 
 Public action model: `MobileAutomationAction`
