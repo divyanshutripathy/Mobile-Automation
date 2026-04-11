@@ -8,7 +8,7 @@ from openenv.core.env_server.types import State
 try:
     from ..models import MobileAutomationAction, MobileAutomationObservation
     from .data import COUPONS, RESTAURANT_PAGE_VISIBLE_ITEMS, RESTAURANTS
-    from .graders import build_metadata, compute_progress_score, compute_reward, is_success
+    from .graders import build_metadata, clamp_public_score, compute_progress_score, compute_reward, is_success
     from .render import render_screenshot, render_xml
     from .sim_state import SimState, action_key, add_to_cart, append_history_entry, state_hash, subtotal
     from .tasks import get_task
@@ -16,7 +16,7 @@ try:
 except ImportError:
     from models import MobileAutomationAction, MobileAutomationObservation
     from server.data import COUPONS, RESTAURANT_PAGE_VISIBLE_ITEMS, RESTAURANTS
-    from server.graders import build_metadata, compute_progress_score, compute_reward, is_success
+    from server.graders import build_metadata, clamp_public_score, compute_progress_score, compute_reward, is_success
     from server.render import render_screenshot, render_xml
     from server.sim_state import SimState, action_key, add_to_cart, append_history_entry, state_hash, subtotal
     from server.tasks import get_task
@@ -106,7 +106,7 @@ class MobileAutomationEnvironment(Environment):
             - reward_breakdown.repetition_penalty
             - reward_breakdown.forbidden_penalty
         )
-        reward = max(0.0, min(1.0, raw_reward))
+        reward = 0.0 if self._sim_state.last_action_status == "forbidden" else clamp_public_score(raw_reward)
         append_history_entry(
             self._sim_state,
             {
@@ -115,7 +115,7 @@ class MobileAutomationEnvironment(Environment):
                 "action": action_payload,
                 "last_action_status": self._sim_state.last_action_status,
                 "reward": reward,
-                "progress_score": 0.0 if self._sim_state.forbidden_triggered else self._progress_score,
+                "progress_score": 0.0 if self._sim_state.forbidden_triggered else clamp_public_score(self._progress_score),
             },
             current_action_key,
         )
@@ -148,7 +148,7 @@ class MobileAutomationEnvironment(Environment):
             xml_hierarchy=render_xml(ui_elements, self._sim_state.screen),
             ui_elements=ui_elements,
             last_action_status=self._sim_state.last_action_status,
-            progress_score=0.0 if self._sim_state.forbidden_triggered else self._progress_score,
+            progress_score=0.0 if self._sim_state.forbidden_triggered else clamp_public_score(self._progress_score),
             reward_breakdown=compute_reward(self._progress_score, self._progress_score, self._sim_state.last_action_status, self._sim_state),
             recent_history=list(self._sim_state.recent_history),
             reward=reward,

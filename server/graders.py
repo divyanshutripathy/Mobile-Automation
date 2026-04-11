@@ -9,6 +9,10 @@ except ImportError:
     from server.sim_state import SimState, state_hash, subtotal, total_after_discount, total_qty
     from server.tasks import TaskSpec
 
+def clamp_public_score(value: float, *, allow_zero: bool = False) -> float:
+    if allow_zero and value <= 0.0:
+        return 0.0
+    return max(0.01, min(0.99, value))
 
 def predicate_satisfaction(state: SimState, task_spec: TaskSpec, terminal: bool = False) -> dict[str, bool]:
     predicates = task_spec.terminal_predicates if terminal else task_spec.progress_predicates
@@ -74,12 +78,12 @@ def compute_reward(prev_progress: float, new_progress: float, action_status: str
     forbidden_penalty = 1.0 if action_status == "forbidden" else 0.0
     final_score = 0.0 if state.forbidden_triggered else new_progress
     return RewardBreakdown(
-        progress_score=0.0 if state.forbidden_triggered else new_progress,
+        progress_score=0.0 if state.forbidden_triggered else clamp_public_score(new_progress),
         delta_progress=0.0 if action_status == "forbidden" else delta_progress,
         step_penalty=step_penalty,
         invalid_penalty=invalid_penalty,
         loop_penalty=loop_penalty,
         repetition_penalty=repetition_penalty,
         forbidden_penalty=forbidden_penalty,
-        final_score=max(0.0, min(1.0, final_score)),
+        final_score=clamp_public_score(final_score, allow_zero=state.forbidden_triggered),
     )

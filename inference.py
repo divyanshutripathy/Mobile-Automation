@@ -26,31 +26,51 @@ MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
 BENCHMARK = "quickcart"
 TASKS = [("food_easy", 7, 12), ("food_medium", 7, 18), ("food_hard", 7, 25)]
+SUCCESSFUL_LLM_CALLS = 0
+ATTEMPTED_LLM_CALLS = 0
+FIRST_PRE_LLM_ERROR: Optional[str] = None
 
 
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
+def _format_number(value: float, decimals: int) -> str:
+    if abs(value - 0.0) < 1e-9:
+        return "0"
+    if abs(value - 1.0) < 1e-9:
+        return "1"
+    return f"{value:.{decimals}f}"
+
+
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     error_val = error if error else "null"
-    print(f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_val}", flush=True)
+    print(
+        f"[STEP] step={step} action={action} reward={_format_number(reward, 2)} done={str(done).lower()} error={error_val}",
+        flush=True,
+    )
 
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+    rewards_str = ",".join(_format_number(reward, 2) for reward in rewards)
+    print(f"[END] success={str(success).lower()} steps={steps} score={_format_number(score, 3)} rewards={rewards_str}", flush=True)
 
 
 def _format_error(exc: Exception) -> str:
     return str(exc).replace("\n", " ").strip() or exc.__class__.__name__
 
 
-def build_env():
+def _record_pre_llm_error(task_id: str, stage: str, exc: Exception) -> None:
+    global FIRST_PRE_LLM_ERROR
+    if FIRST_PRE_LLM_ERROR is None:
+        FIRST_PRE_LLM_ERROR = f"task={task_id} stage={stage} error={_format_error(exc)}"
+
+
+async def build_env():
     if ENV_BASE_URL:
-        return MobileAutomationEnv(base_url=ENV_BASE_URL).sync()
+        return MobileAutomationEnv(base_url=ENV_BASE_URL)
     if IMAGE_NAME:
-        return asyncio.run(MobileAutomationEnv.from_docker_image(IMAGE_NAME)).sync()
+        return await MobileAutomationEnv.from_docker_image(IMAGE_NAME)
     raise RuntimeError("Missing IMAGE_NAME/LOCAL_IMAGE_NAME or ENV_BASE_URL.")
 
 
@@ -218,6 +238,7 @@ def _action_space_spec() -> dict[str, Any]:
 
 
 def model_action(client: OpenAI, observation) -> tuple[MobileAutomationAction, Optional[str]]:
+    global ATTEMPTED_LLM_CALLS, SUCCESSFUL_LLM_CALLS
     prompt = {
         "goal": observation.goal,
         "current_state_summary": _observable_summary(observation),
@@ -242,6 +263,7 @@ def model_action(client: OpenAI, observation) -> tuple[MobileAutomationAction, O
         ),
     }
     try:
+        ATTEMPTED_LLM_CALLS += 1
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -260,28 +282,41 @@ def model_action(client: OpenAI, observation) -> tuple[MobileAutomationAction, O
             temperature=0,
             stream=False,
         )
+        SUCCESSFUL_LLM_CALLS += 1
         payload = _extract_action_payload(completion.choices[0].message.content or "")
         return MobileAutomationAction.model_validate(payload), None
     except Exception as exc:
-        return fallback_action(), _format_error(exc)
+        raise RuntimeError(f"LLM call failed on attempt {ATTEMPTED_LLM_CALLS}: {_format_error(exc)}") from exc
 
 
-def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> None:
+async def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> None:
     env = None
     rewards: List[float] = []
     steps_taken = 0
     success = False
     score = 0.0
+    stage = "start"
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
     try:
-        env = build_env()
-        result = env.reset(task_id=task_id, seed=seed)
+        stage = "build_env"
+        env = await build_env()
+        stage = "reset"
+        result = await env.reset(task_id=task_id, seed=seed)
+        stage = "post_reset"
         for step in range(1, max_steps + 1):
             if result.done:
+                if ATTEMPTED_LLM_CALLS == 0:
+                    _record_pre_llm_error(
+                        task_id,
+                        "reset_returned_done",
+                        RuntimeError("Environment returned done=True before the first model action."),
+                    )
                 break
+            stage = f"model_action_step_{step}"
             action, action_error = model_action(client, result.observation)
-            result = env.step(action)
+            stage = f"env_step_{step}"
+            result = await env.step(action)
             reward = float(result.reward or 0.0)
             rewards.append(reward)
             steps_taken = step
@@ -289,20 +324,22 @@ def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> None:
             if result.done:
                 break
         score = float(result.observation.reward_breakdown.final_score)
-        success = score >= 1.0 - 1e-9
+        success = score >= 0.99 - 1e-9
     except Exception as exc:
+        if ATTEMPTED_LLM_CALLS == 0:
+            _record_pre_llm_error(task_id, stage, exc)
         step_no = steps_taken + 1 if steps_taken > 0 else 0
         log_step(step_no, "null", 0.0, True, _format_error(exc))
     finally:
         if env is not None:
             try:
-                env.close()
+                await env.close()
             except Exception:
                 pass
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
-def main() -> None:
+async def main() -> None:
     if not API_KEY or not API_BASE_URL:
         missing = []
         if not API_KEY:
@@ -319,15 +356,22 @@ def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     for task_id, seed, max_steps in TASKS:
         try:
-            run_task(client, task_id, seed, max_steps)
+            await run_task(client, task_id, seed, max_steps)
         except Exception as exc:
             log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
             log_step(0, "null", 0.0, True, _format_error(exc))
             log_end(success=False, steps=0, score=0.0, rewards=[])
 
+    if ATTEMPTED_LLM_CALLS == 0:
+        if FIRST_PRE_LLM_ERROR is not None:
+            raise RuntimeError(
+                "No LLM calls were attempted. "
+                f"First pre-LLM failure: {FIRST_PRE_LLM_ERROR}"
+            )
+        raise RuntimeError("No LLM calls were attempted")
+    if SUCCESSFUL_LLM_CALLS == 0:
+        raise RuntimeError("LLM calls were attempted but none succeeded.")
+
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        pass
+    asyncio.run(main())
