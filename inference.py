@@ -69,6 +69,10 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
 
 
+def _format_error(exc: Exception) -> str:
+    return str(exc).replace("\n", " ").strip() or exc.__class__.__name__
+
+
 async def build_env():
     if ENV_BASE_URL:
         return MobileAutomationEnv(base_url=ENV_BASE_URL)
@@ -292,7 +296,7 @@ def model_action(client: OpenAI, observation) -> tuple[MobileAutomationAction, O
 
 
 async def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> None:
-    env = await build_env()
+    env = None
     rewards: List[float] = []
     steps_taken = 0
     success = False
@@ -300,6 +304,7 @@ async def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> N
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
     try:
+        env = await build_env()
         result = await env.reset(task_id=task_id, seed=seed)
         for step in range(1, max_steps + 1):
             if result.done:
@@ -314,18 +319,37 @@ async def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> N
                 break
         score = float(result.observation.reward_breakdown.final_score)
         success = score >= 1.0 - 1e-9
+    except Exception as exc:
+        step_no = steps_taken + 1 if steps_taken > 0 else 0
+        log_step(step_no, "null", 0.0, True, _format_error(exc))
     finally:
-        await env.close()
+        if env is not None:
+            try:
+                await env.close()
+            except Exception:
+                pass
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 async def main() -> None:
     if not API_KEY:
-        raise RuntimeError("Missing API key. Set HF_TOKEN or API_KEY in your environment.")
+        for task_id, _seed, _max_steps in TASKS:
+            log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+            log_step(0, "null", 0.0, True, "Missing API key. Set HF_TOKEN or API_KEY in your environment.")
+            log_end(success=False, steps=0, score=0.0, rewards=[])
+        return
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     for task_id, seed, max_steps in TASKS:
-        await run_task(client, task_id, seed, max_steps)
+        try:
+            await run_task(client, task_id, seed, max_steps)
+        except Exception as exc:
+            log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+            log_step(0, "null", 0.0, True, _format_error(exc))
+            log_end(success=False, steps=0, score=0.0, rewards=[])
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception:
+        pass
