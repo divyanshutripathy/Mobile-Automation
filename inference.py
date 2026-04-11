@@ -1,30 +1,3 @@
-"""
-Inference Script Example
-===================================
-MANDATORY
-- Before submitting, ensure the following variables are defined in your environment configuration:
-    API_BASE_URL   The API endpoint for the LLM.
-    MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
-    LOCAL_IMAGE_NAME The name of the local image to use for the environment if you are using from_docker_image()
-                     method
-
-- Defaults are set only for API_BASE_URL and MODEL_NAME
-    (and should reflect your active inference setup):
-    API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-    MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-
-- The inference script must be named `inference.py` and placed in the root directory of the project
-- Participants must use OpenAI Client for all LLM calls using above variables
-
-STDOUT FORMAT
-- The script must emit exactly three line types to stdout, in this order:
-
-    [START] task=<task_name> env=<benchmark> model=<model_name>
-    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -34,10 +7,10 @@ import re
 import sys
 from typing import Any, List, Optional
 
-from openai import OpenAI
 from dotenv import load_dotenv
+from openai import OpenAI
 
-load_dotenv() 
+load_dotenv()
 
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_PARENT = os.path.dirname(PACKAGE_DIR)
@@ -73,11 +46,11 @@ def _format_error(exc: Exception) -> str:
     return str(exc).replace("\n", " ").strip() or exc.__class__.__name__
 
 
-async def build_env():
+def build_env():
     if ENV_BASE_URL:
-        return MobileAutomationEnv(base_url=ENV_BASE_URL)
+        return MobileAutomationEnv(base_url=ENV_BASE_URL).sync()
     if IMAGE_NAME:
-        return await MobileAutomationEnv.from_docker_image(IMAGE_NAME)
+        return asyncio.run(MobileAutomationEnv.from_docker_image(IMAGE_NAME)).sync()
     raise RuntimeError("Missing IMAGE_NAME/LOCAL_IMAGE_NAME or ENV_BASE_URL.")
 
 
@@ -207,7 +180,7 @@ def _observable_missing_requirements(observation) -> list[str]:
 
 
 def _observable_summary(observation) -> dict[str, Any]:
-    summary = {
+    return {
         "screen_id": observation.screen_id,
         "cart_lines": _cart_lines(observation),
         "coupon_input": _find_ui_value(observation, "coupon_input"),
@@ -217,7 +190,6 @@ def _observable_summary(observation) -> dict[str, Any]:
         "search_performed": _search_performed(observation),
         "missing_requirements": _observable_missing_requirements(observation),
     }
-    return summary
 
 
 def _action_space_spec() -> dict[str, Any]:
@@ -286,16 +258,15 @@ def model_action(client: OpenAI, observation) -> tuple[MobileAutomationAction, O
                 {"role": "user", "content": json.dumps(prompt)},
             ],
             temperature=0,
-            # max_tokens=200,
             stream=False,
         )
         payload = _extract_action_payload(completion.choices[0].message.content or "")
         return MobileAutomationAction.model_validate(payload), None
     except Exception as exc:
-        return fallback_action(), str(exc).replace("\n", " ")
+        return fallback_action(), _format_error(exc)
 
 
-async def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> None:
+def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> None:
     env = None
     rewards: List[float] = []
     steps_taken = 0
@@ -304,13 +275,13 @@ async def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> N
 
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
     try:
-        env = await build_env()
-        result = await env.reset(task_id=task_id, seed=seed)
+        env = build_env()
+        result = env.reset(task_id=task_id, seed=seed)
         for step in range(1, max_steps + 1):
             if result.done:
                 break
             action, action_error = model_action(client, result.observation)
-            result = await env.step(action)
+            result = env.step(action)
             reward = float(result.reward or 0.0)
             rewards.append(reward)
             steps_taken = step
@@ -325,23 +296,24 @@ async def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> N
     finally:
         if env is not None:
             try:
-                await env.close()
+                env.close()
             except Exception:
                 pass
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
-async def main_func() -> None:
+def main() -> None:
     if not API_KEY:
         for task_id, _seed, _max_steps in TASKS:
             log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
             log_step(0, "null", 0.0, True, "Missing API key. Set HF_TOKEN or API_KEY in your environment.")
             log_end(success=False, steps=0, score=0.0, rewards=[])
         return
+
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     for task_id, seed, max_steps in TASKS:
         try:
-            await run_task(client, task_id, seed, max_steps)
+            run_task(client, task_id, seed, max_steps)
         except Exception as exc:
             log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
             log_step(0, "null", 0.0, True, _format_error(exc))
@@ -350,6 +322,6 @@ async def main_func() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main_func())
+        main()
     except Exception:
         pass
