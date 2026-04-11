@@ -20,8 +20,8 @@ if PROJECT_PARENT not in sys.path:
 from mobile_automation import MobileAutomationAction, MobileAutomationEnv
 
 IMAGE_NAME = os.getenv("IMAGE_NAME") or os.getenv("LOCAL_IMAGE_NAME")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+API_KEY = os.getenv("API_KEY")
+API_BASE_URL = os.getenv("API_BASE_URL")
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
 BENCHMARK = "quickcart"
@@ -303,10 +303,16 @@ def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> None:
 
 
 def main() -> None:
-    if not API_KEY:
+    if not API_KEY or not API_BASE_URL:
+        missing = []
+        if not API_KEY:
+            missing.append("API_KEY")
+        if not API_BASE_URL:
+            missing.append("API_BASE_URL")
+        error_message = f"Missing required environment variable(s): {', '.join(missing)}."
         for task_id, _seed, _max_steps in TASKS:
             log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
-            log_step(0, "null", 0.0, True, "Missing API key. Set HF_TOKEN or API_KEY in your environment.")
+            log_step(0, "null", 0.0, True, error_message)
             log_end(success=False, steps=0, score=0.0, rewards=[])
         return
 
