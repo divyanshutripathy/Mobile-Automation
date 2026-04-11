@@ -331,7 +331,7 @@ async def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> N
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
-async def main() -> None:
+async def main_func() -> None:
     if not API_KEY:
         for task_id, _seed, _max_steps in TASKS:
             log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
@@ -350,6 +350,6 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(main_func())
     except Exception:
         pass
