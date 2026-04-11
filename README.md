@@ -1,3 +1,14 @@
+---
+title: Mobile Automation Environment Server
+emoji: 🔊
+sdk: docker
+pinned: false
+app_port: 8000
+base_path: /web
+tags:
+  - openenv
+---
+
 # QuickCart OpenEnv Environment
 
 `mobile_automation` is a deterministic simulated mobile food-ordering environment built for OpenEnv. It models a mock delivery app called `QuickCart` using hidden semantic state, reusable screen templates, deterministic XML and screenshot rendering, and rule-based grading for three tasks.

@@ -5,14 +5,14 @@ MANDATORY
 - Before submitting, ensure the following variables are defined in your environment configuration:
     API_BASE_URL   The API endpoint for the LLM.
     MODEL_NAME     The model identifier to use for inference.
-    OPENAI_API_KEY The OpenAI API key to use for inference.
+    HF_TOKEN       Your Hugging Face / API key.
     LOCAL_IMAGE_NAME The name of the local image to use for the environment if you are using from_docker_image()
                      method
 
 - Defaults are set only for API_BASE_URL and MODEL_NAME
     (and should reflect your active inference setup):
-    API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-    MODEL_NAME = os.getenv("MODEL_NAME", "gpt-5.4-mini")
+    API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+    MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
 - The inference script must be named `inference.py` and placed in the root directory of the project
 - Participants must use OpenAI Client for all LLM calls using above variables
@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from typing import Any, List, Optional
 
@@ -45,40 +46,13 @@ if PROJECT_PARENT not in sys.path:
 
 from mobile_automation import MobileAutomationAction, MobileAutomationEnv
 
-LOCAL_IMAGE_NAME = os.getenv("IMAGE_NAME") or os.getenv("LOCAL_IMAGE_NAME")
-API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY") or os.getenv("HF_TOKEN")
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://api.openai.com/v1"
-MODEL_NAME = os.getenv("MODEL_NAME") or "gpt-5.4-mini"
+IMAGE_NAME = os.getenv("IMAGE_NAME") or os.getenv("LOCAL_IMAGE_NAME")
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
 BENCHMARK = "quickcart"
 TASKS = [("food_easy", 7, 12), ("food_medium", 7, 18), ("food_hard", 7, 25)]
-
-ACTION_TOOL = [
-    {
-        "type": "function",
-        "function": {
-            "name": "submit_action",
-            "description": "Choose the next QuickCart action. Never place the order unless explicitly instructed.",
-            "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "action_type": {
-                        "type": "string",
-                        "enum": ["tap", "type", "scroll", "back", "wait"],
-                    },
-                    "target_id": {"type": ["string", "null"]},
-                    "text": {"type": ["string", "null"]},
-                    "direction": {
-                        "type": ["string", "null"],
-                        "enum": ["up", "down", "left", "right", None],
-                    },
-                },
-                "required": ["action_type", "target_id", "text", "direction"],
-            },
-        },
-    }
-]
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -98,21 +72,38 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 async def build_env():
     if ENV_BASE_URL:
         return MobileAutomationEnv(base_url=ENV_BASE_URL)
-    return await MobileAutomationEnv.from_docker_image(LOCAL_IMAGE_NAME)
+    if IMAGE_NAME:
+        return await MobileAutomationEnv.from_docker_image(IMAGE_NAME)
+    raise RuntimeError("Missing IMAGE_NAME/LOCAL_IMAGE_NAME or ENV_BASE_URL.")
 
 
 def fallback_action() -> MobileAutomationAction:
     return MobileAutomationAction(action_type="wait")
 
 
-def _extract_tool_args(message: Any) -> dict[str, Any]:
-    tool_calls = getattr(message, "tool_calls", None) or []
-    if not tool_calls:
-        raise ValueError(f"No tool call returned. Raw content: {getattr(message, 'content', None)!r}")
-    arguments = tool_calls[0].function.arguments
-    if isinstance(arguments, dict):
-        return arguments
-    return json.loads(arguments)
+def _sanitize_payload_for_validation(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(payload)
+    action_type = sanitized.get("action_type")
+
+    if action_type in {"back", "wait"}:
+        sanitized["target_id"] = None
+        sanitized["text"] = None
+        sanitized["direction"] = None
+
+    return sanitized
+
+
+def _extract_action_payload(raw_text: str) -> dict[str, Any]:
+    raw_text = raw_text.strip()
+    if not raw_text:
+        raise ValueError("Model returned empty content")
+    try:
+        return _sanitize_payload_for_validation(json.loads(raw_text))
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if not match:
+            raise
+        return _sanitize_payload_for_validation(json.loads(match.group(0)))
 
 
 def _find_ui_value(observation, element_id: str) -> Optional[str]:
@@ -225,6 +216,31 @@ def _observable_summary(observation) -> dict[str, Any]:
     return summary
 
 
+def _action_space_spec() -> dict[str, Any]:
+    return {
+        "allowed_action_types": ["tap", "type", "scroll", "back", "wait"],
+        "rules": {
+            "tap": "target_id is required; text must be null; direction must be null",
+            "type": "target_id and text are required; direction must be null",
+            "scroll": "direction is required and must be one of up/down/left/right; target_id must be null; text must be null",
+            "back": "target_id must be null; text must be null; direction must be null",
+            "wait": "target_id must be null; text must be null; direction must be null",
+        },
+        "forbidden_synonyms": ["click", "press", "input", "enter_text", "swipe"],
+        "response_examples": [
+            {"action_type": "tap", "target_id": "restaurant_card_spice_route", "text": None, "direction": None},
+            {"action_type": "type", "target_id": "search_bar", "text": "spice", "direction": None},
+            {"action_type": "scroll", "target_id": None, "text": None, "direction": "down"},
+            {"action_type": "back", "target_id": None, "text": None, "direction": None},
+            {"action_type": "wait", "target_id": None, "text": None, "direction": None},
+        ],
+        "response_contract": (
+            "Return exactly one raw JSON object with keys action_type, target_id, text, and direction. "
+            "Do not return markdown, code fences, comments, prose, or any extra keys."
+        ),
+    }
+
+
 def model_action(client: OpenAI, observation) -> tuple[MobileAutomationAction, Optional[str]]:
     prompt = {
         "goal": observation.goal,
@@ -232,6 +248,8 @@ def model_action(client: OpenAI, observation) -> tuple[MobileAutomationAction, O
         "screen_id": observation.screen_id,
         "last_action_status": observation.last_action_status,
         "recent_history": [entry.model_dump() for entry in observation.recent_history],
+        "action_space": _action_space_spec(),
+        "visible_target_ids": [element.element_id for element in observation.ui_elements if element.visible],
         "ui_elements": [element.model_dump() for element in observation.ui_elements],
         "xml_hierarchy": observation.xml_hierarchy,
         "screenshot_b64": observation.screenshot_b64,
@@ -239,7 +257,12 @@ def model_action(client: OpenAI, observation) -> tuple[MobileAutomationAction, O
             "Every clause in the goal is mandatory. "
             "Do not assume the task is complete just because you reached a plausible final screen. "
             "Use the current UI and recent history to verify search, cart contents, quantity, coupon, delivery mode, and budget before deciding to wait. "
-            "Never place the order."
+            "Never place the order. "
+            "Use only these exact action_type literals: tap, type, scroll, back, wait. "
+            "Do not use synonyms such as click, press, input, enter_text, or swipe. "
+            "Always return all four keys: action_type, target_id, text, direction. "
+            "Use null for every unused field. "
+            "Copy target_id values exactly from visible_target_ids."
         ),
     }
     try:
@@ -252,18 +275,17 @@ def model_action(client: OpenAI, observation) -> tuple[MobileAutomationAction, O
                         "You are controlling QuickCart. "
                         "Choose exactly one safe next action based on the current observation and recent history. "
                         "Use the goal text, current UI, and recent history to decide whether the task is actually complete. "
-                        "Use the submit_action function for every reply."
+                        "Return exactly one raw JSON object and no other text. "
+                        "The JSON object must contain exactly these keys: action_type, target_id, text, direction."
                     ),
                 },
                 {"role": "user", "content": json.dumps(prompt)},
             ],
             temperature=0,
-            max_completion_tokens=200,
-            tools=ACTION_TOOL,
-            tool_choice={"type": "function", "function": {"name": "submit_action"}},
+            # max_tokens=200,
             stream=False,
         )
-        payload = _extract_tool_args(completion.choices[0].message)
+        payload = _extract_action_payload(completion.choices[0].message.content or "")
         return MobileAutomationAction.model_validate(payload), None
     except Exception as exc:
         return fallback_action(), str(exc).replace("\n", " ")
@@ -299,7 +321,7 @@ async def run_task(client: OpenAI, task_id: str, seed: int, max_steps: int) -> N
 
 async def main() -> None:
     if not API_KEY:
-        raise RuntimeError("Missing API key. Set OPENAI_API_KEY or API_KEY in your .env file.")
+        raise RuntimeError("Missing API key. Set HF_TOKEN or API_KEY in your environment.")
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     for task_id, seed, max_steps in TASKS:
         await run_task(client, task_id, seed, max_steps)
